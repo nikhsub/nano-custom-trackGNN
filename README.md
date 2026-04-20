@@ -75,6 +75,15 @@ scram b -j8
 cmsenv
 ```
 
+
+## TrackGNN NanoAOD extension
+
+A concrete MiniAOD → NanoAOD porting plan for TrackGNN inference (including model outputs and `edge_index` persistence) is documented in:
+
+- [`docs/trackgnn_nanoaod_porting_plan.md`](docs/trackgnn_nanoaod_porting_plan.md)
+
+This plan is intended to be used when adding a dedicated producer + FlatTable output branches into the Nano production path.
+
 ## Production
 
 **Step 0**: switch to the crab production directory and set up grid proxy, CRAB environment, etc.

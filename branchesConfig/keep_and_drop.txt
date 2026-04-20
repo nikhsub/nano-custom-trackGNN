@@ -353,3 +353,9 @@ drop TrigObj_l2pt
 drop TrigObj_phi
 drop TrigObj_pt
 keep TrkMET_phi
+keep nTrackGNNTrack
+keep nTrackGNNEdge
+keep nTrackGNNEdgeRaw
+keep TrackGNN_track_SV_prob_*
+keep TrackGNN_track_sub_prob_*
+keep TrackGNN_edge_*
