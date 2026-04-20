@@ -62,3 +62,16 @@ done
 # # dump configuration to file dump.py
 # with open('dump.py', 'w') as f:
 #     f.write(process.dumpPython())
+
+
+# append TrackGNN Nano customization to all generated cfgs
+for cfg in $(ls mc*.py data*.py 2>/dev/null); do
+    if grep -q "nanoAOD_addTrackGNN" ${cfg}; then
+        continue
+    fi
+    echo "Adding TrackGNN customization to ${cfg}"
+    sed -i -e '/# Customisation from command line/a from modrundata.trackGNN_cff import nanoAOD_addTrackGNN
+process = nanoAOD_addTrackGNN(process)
+' ${cfg}
+done
+
