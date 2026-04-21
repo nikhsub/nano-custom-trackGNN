@@ -1,0 +1,2 @@
+plugin in CMSSW_15_0_17/src/PhysicsTools/NanoAOD/plugins/
+cfgs in CMSSW_15_0_17/src/PhysicsTools/NanoAOD/python/

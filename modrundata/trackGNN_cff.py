@@ -1,20 +1,26 @@
 import FWCore.ParameterSet.Config as cms
 
-from modrundata.trackGNN_cfi import trackGNNNano
-
+from PhysicsTools.NanoAOD.trackGNN_cfi import trackGNNNano
 
 def nanoAOD_addTrackGNN(process):
-    process.trackGNNNano = trackGNNNano
+    process.trackGNNNano = trackGNNNano.clone()
 
+    if hasattr(process, "nanoSequenceMC"):
+        process.nanoSequenceMC = cms.Sequence(process.nanoSequenceMC + process.trackGNNNano)
     if hasattr(process, "nanoSequence"):
         process.nanoSequence = cms.Sequence(process.nanoSequence + process.trackGNNNano)
-    else:
+
+    if not hasattr(process, "nanoSequenceMC") and not hasattr(process, "nanoSequence"):
         process.trackGNN_step = cms.Path(process.trackGNNNano)
 
-    if hasattr(process, "NANOAODoutput") and hasattr(process.NANOAODoutput, "outputCommands"):
-        process.NANOAODoutput.outputCommands.extend([
-            "keep *_trackGNNNano_*_*",
-            "keep nanoaodFlatTable_trackGNNNano*_*_*",
-        ])
+    keep_cmds = [
+        "keep nanoaodFlatTable_trackGNNNano_TrackGNNTrackTable_*",
+        "keep nanoaodFlatTable_trackGNNNano_TrackGNNEdgeTable_*",
+        "keep nanoaodFlatTable_trackGNNNano_TrackGNNSummaryTable_*",
+    ]
+
+    for out in ("NANOAODoutput", "NANOAODSIMoutput"):
+        if hasattr(process, out) and hasattr(getattr(process, out), "outputCommands"):
+            getattr(process, out).outputCommands.extend(keep_cmds)
 
     return process

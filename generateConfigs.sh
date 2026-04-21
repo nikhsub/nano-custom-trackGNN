@@ -45,10 +45,10 @@ cmsDriver.py mc_2024 --mc --era Run3_2024 --step NANO --conditions 150X_mcRun3_2
 # append the following two lines to all configs
 # from TopQuarkAnalysis.BFragmentationAnalyzer.customizeAddAll import customizeAddWeights
 # customizeAddWeights(process, addClassicBFragAndDecay=True, addMLBfrag=True, addMLHdamp=True, addMLNNLO=True)
-for cfg in $(ls mc*.py); do
-    echo "Adding B fragmentation and TOP ML weight customizations to ${cfg}"
-    sed -i -e '/# Customisation from command line/a from TopQuarkAnalysis.BFragmentationAnalyzer.customizeAddAll import customizeAddWeights\ncustomizeAddWeights(process, addClassicBFragAndDecay=True, addClassicCFragAndDecay=True, addMLBfrag=True, addMLHdamp=True, addMLNNLO=True)\n' ${cfg}
-done
+#for cfg in $(ls mc*.py); do
+#    echo "Adding B fragmentation and TOP ML weight customizations to ${cfg}"
+#    sed -i -e '/# Customisation from command line/a from TopQuarkAnalysis.BFragmentationAnalyzer.customizeAddAll import customizeAddWeights\ncustomizeAddWeights(process, addClassicBFragAndDecay=True, addClassicCFragAndDecay=True, addMLBfrag=True, addMLHdamp=True, addMLNNLO=True)\n' ${cfg}
+#done
 
 # ----------------------------------------
 
@@ -65,13 +65,14 @@ done
 
 
 # append TrackGNN Nano customization to all generated cfgs
-for cfg in $(ls mc*.py data*.py 2>/dev/null); do
-    if grep -q "nanoAOD_addTrackGNN" ${cfg}; then
-        continue
-    fi
-    echo "Adding TrackGNN customization to ${cfg}"
-    sed -i -e '/# Customisation from command line/a from modrundata.trackGNN_cff import nanoAOD_addTrackGNN
+for cfg in mc*.py data*.py; do
+    [ -e "$cfg" ] || continue
+    grep -q "nanoAOD_addTrackGNN" "$cfg" && continue
+
+    echo "Adding TrackGNN customization to $cfg"
+    sed -i '/# Customisation from command line/a\
+from PhysicsTools.NanoAOD.trackGNN_cff import nanoAOD_addTrackGNN\
 process = nanoAOD_addTrackGNN(process)
-' ${cfg}
+' "$cfg"
 done
 

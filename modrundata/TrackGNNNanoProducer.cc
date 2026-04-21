@@ -1,36 +1,36 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "CommonTools/Utils/interface/StringCutObjectSelector.h"
-#include "DataFormats/BeamSpot/interface/BeamSpot.h"
-#include "DataFormats/Common/interface/Handle.h"
 #include "DataFormats/Math/interface/deltaR.h"
+#include "DataFormats/NanoAOD/interface/FlatTable.h"
 #include "DataFormats/PatCandidates/interface/PackedCandidate.h"
 #include "DataFormats/TrackReco/interface/Track.h"
 #include "DataFormats/VertexReco/interface/Vertex.h"
 #include "FWCore/Framework/interface/Event.h"
 #include "FWCore/Framework/interface/EventSetup.h"
 #include "FWCore/Framework/interface/MakerMacros.h"
-#include "FWCore/Framework/interface/global/EDProducer.h"
+#include "FWCore/Framework/interface/stream/EDProducer.h"
 #include "FWCore/ParameterSet/interface/ConfigurationDescriptions.h"
 #include "FWCore/ParameterSet/interface/FileInPath.h"
 #include "FWCore/ParameterSet/interface/ParameterSet.h"
 #include "FWCore/Utilities/interface/InputTag.h"
 #include "PhysicsTools/ONNXRuntime/interface/ONNXRuntime.h"
-#include "RecoVertex/VertexPrimitives/interface/VertexDistance3D.h"
+#include "RecoVertex/VertexTools/interface/VertexDistance3D.h"
 #include "TrackingTools/IPTools/interface/IPTools.h"
 #include "TrackingTools/PatternTools/interface/TwoTrackMinimumDistance.h"
 #include "TrackingTools/Records/interface/TransientTrackRecord.h"
 #include "TrackingTools/TransientTrack/interface/TransientTrack.h"
 #include "TrackingTools/TransientTrack/interface/TransientTrackBuilder.h"
 
-class TrackGNNNanoProducer : public edm::global::EDProducer<edm::GlobalCache<ONNXRuntime>> {
+class TrackGNNNanoProducer : public edm::stream::EDProducer<edm::GlobalCache<cms::Ort::ONNXRuntime>> {
 public:
-  explicit TrackGNNNanoProducer(const edm::ParameterSet &cfg)
-      : tracksToken_(consumes<pat::PackedCandidateCollection>(cfg.getParameter<edm::InputTag>("tracks"))),
+  explicit TrackGNNNanoProducer(const edm::ParameterSet& cfg, const cms::Ort::ONNXRuntime* cache)
+      : onnxRuntime_(cache),
+        tracksToken_(consumes<pat::PackedCandidateCollection>(cfg.getParameter<edm::InputTag>("tracks"))),
         lostTracksToken_(consumes<pat::PackedCandidateCollection>(cfg.getParameter<edm::InputTag>("losttracks"))),
         pvToken_(consumes<reco::VertexCollection>(cfg.getParameter<edm::InputTag>("primaryVertices"))),
         ttbToken_(esConsumes(edm::ESInputTag("", "TransientTrackBuilder"))),
@@ -49,108 +49,77 @@ public:
         edgePairMomMin_(cfg.getParameter<double>("edgePairMomMin")),
         edgePairMomMax_(cfg.getParameter<double>("edgePairMomMax")),
         writeLogits_(cfg.getParameter<bool>("writeLogits")) {
-    produces<unsigned int>("nTrackGNNTrack");
-    produces<unsigned int>("nTrackGNNEdge");
-    produces<unsigned int>("nTrackGNNEdgeRaw");
-
-    produces<std::vector<float>>("TrackGNN_track_SV_prob_nonSV");
-    produces<std::vector<float>>("TrackGNN_track_SV_prob_PV");
-    produces<std::vector<float>>("TrackGNN_track_SV_prob_SV");
-
-    produces<std::vector<float>>("TrackGNN_track_sub_prob_0");
-    produces<std::vector<float>>("TrackGNN_track_sub_prob_1");
-    produces<std::vector<float>>("TrackGNN_track_sub_prob_2");
-
-    produces<std::vector<int>>("TrackGNN_edge_src");
-    produces<std::vector<int>>("TrackGNN_edge_dst");
-    produces<std::vector<float>>("TrackGNN_edge_prob");
-
-    if (writeLogits_) {
-      produces<std::vector<float>>("TrackGNN_track_SV_logit_nonSV");
-      produces<std::vector<float>>("TrackGNN_track_SV_logit_PV");
-      produces<std::vector<float>>("TrackGNN_track_SV_logit_SV");
-      produces<std::vector<float>>("TrackGNN_track_sub_logit_0");
-      produces<std::vector<float>>("TrackGNN_track_sub_logit_1");
-      produces<std::vector<float>>("TrackGNN_track_sub_logit_2");
-      produces<std::vector<float>>("TrackGNN_edge_logit");
-    }
+    produces<nanoaod::FlatTable>("TrackGNNTrackTable");
+    produces<nanoaod::FlatTable>("TrackGNNEdgeTable");
+    produces<nanoaod::FlatTable>("TrackGNNSummaryTable");
   }
 
-  static std::unique_ptr<ONNXRuntime> initializeGlobalCache(const edm::ParameterSet &cfg) {
-    return std::make_unique<ONNXRuntime>(cfg.getParameter<edm::FileInPath>("model_path").fullPath());
+  static std::unique_ptr<cms::Ort::ONNXRuntime> initializeGlobalCache(const edm::ParameterSet& cfg) {
+    return std::make_unique<cms::Ort::ONNXRuntime>(cfg.getParameter<edm::FileInPath>("model_path").fullPath());
   }
 
-  static void globalEndJob(const ONNXRuntime *) {}
+  static void globalEndJob(const cms::Ort::ONNXRuntime*) {}
 
-  void produce(edm::StreamID, edm::Event &event, const edm::EventSetup &setup) const override {
-    auto nTrackOut = std::make_unique<unsigned int>(0);
-    auto nEdgeOut = std::make_unique<unsigned int>(0);
-    auto nEdgeRawOut = std::make_unique<unsigned int>(0);
+  void produce(edm::Event& event, const edm::EventSetup& setup) override {
+    std::vector<float> trackSVNonSV;
+    std::vector<float> trackSVPV;
+    std::vector<float> trackSVSV;
+    std::vector<float> trackSub0;
+    std::vector<float> trackSub1;
+    std::vector<float> trackSub2;
 
-    auto trackSVNonSV = std::make_unique<std::vector<float>>();
-    auto trackSVPV = std::make_unique<std::vector<float>>();
-    auto trackSVSV = std::make_unique<std::vector<float>>();
-    auto trackSub0 = std::make_unique<std::vector<float>>();
-    auto trackSub1 = std::make_unique<std::vector<float>>();
-    auto trackSub2 = std::make_unique<std::vector<float>>();
+    std::vector<float> svLogit0;
+    std::vector<float> svLogit1;
+    std::vector<float> svLogit2;
+    std::vector<float> subLogit0;
+    std::vector<float> subLogit1;
+    std::vector<float> subLogit2;
 
-    auto edgeSrc = std::make_unique<std::vector<int>>();
-    auto edgeDst = std::make_unique<std::vector<int>>();
-    auto edgeProb = std::make_unique<std::vector<float>>();
+    std::vector<int> edgeSrc;
+    std::vector<int> edgeDst;
+    std::vector<float> edgeProb;
+    std::vector<float> edgeLogit;
 
-    std::unique_ptr<std::vector<float>> svLogit0;
-    std::unique_ptr<std::vector<float>> svLogit1;
-    std::unique_ptr<std::vector<float>> svLogit2;
-    std::unique_ptr<std::vector<float>> subLogit0;
-    std::unique_ptr<std::vector<float>> subLogit1;
-    std::unique_ptr<std::vector<float>> subLogit2;
-    std::unique_ptr<std::vector<float>> edgeLogit;
-    if (writeLogits_) {
-      svLogit0 = std::make_unique<std::vector<float>>();
-      svLogit1 = std::make_unique<std::vector<float>>();
-      svLogit2 = std::make_unique<std::vector<float>>();
-      subLogit0 = std::make_unique<std::vector<float>>();
-      subLogit1 = std::make_unique<std::vector<float>>();
-      subLogit2 = std::make_unique<std::vector<float>>();
-      edgeLogit = std::make_unique<std::vector<float>>();
-    }
+    unsigned int nTrackOut = 0;
+    unsigned int nEdgeOut = 0;
+    unsigned int nEdgeRawOut = 0;
 
-    const auto &tracks = event.get(tracksToken_);
-    const auto &lostTracks = event.get(lostTracksToken_);
-    const auto &pvs = event.get(pvToken_);
+    const auto& tracks = event.get(tracksToken_);
+    const auto& lostTracks = event.get(lostTracksToken_);
+    const auto& pvs = event.get(pvToken_);
 
     if (pvs.empty()) {
       putOutputs(event,
-                 std::move(nTrackOut),
-                 std::move(nEdgeOut),
-                 std::move(nEdgeRawOut),
-                 std::move(trackSVNonSV),
-                 std::move(trackSVPV),
-                 std::move(trackSVSV),
-                 std::move(trackSub0),
-                 std::move(trackSub1),
-                 std::move(trackSub2),
-                 std::move(edgeSrc),
-                 std::move(edgeDst),
-                 std::move(edgeProb),
-                 std::move(svLogit0),
-                 std::move(svLogit1),
-                 std::move(svLogit2),
-                 std::move(subLogit0),
-                 std::move(subLogit1),
-                 std::move(subLogit2),
-                 std::move(edgeLogit));
+                 nTrackOut,
+                 nEdgeOut,
+                 nEdgeRawOut,
+                 trackSVNonSV,
+                 trackSVPV,
+                 trackSVSV,
+                 trackSub0,
+                 trackSub1,
+                 trackSub2,
+                 edgeSrc,
+                 edgeDst,
+                 edgeProb,
+                 svLogit0,
+                 svLogit1,
+                 svLogit2,
+                 subLogit0,
+                 subLogit1,
+                 subLogit2,
+                 edgeLogit);
       return;
     }
 
-    const reco::Vertex &pv = pvs.front();
-    const auto &ttb = setup.getData(ttbToken_);
+    const reco::Vertex& pv = pvs.front();
+    const auto& ttb = setup.getData(ttbToken_);
 
     std::vector<reco::Track> allTracks;
     std::vector<reco::TransientTrack> transientTracks;
 
-    auto addPacked = [&](const pat::PackedCandidateCollection &collection) {
-      for (const auto &cand : collection) {
+    auto addPacked = [&](const pat::PackedCandidateCollection& collection) {
+      for (const auto& cand : collection) {
         if (requireTrackDetails_ && !cand.hasTrackDetails())
           continue;
         if (!cand.hasTrackDetails())
@@ -178,29 +147,29 @@ public:
     addPacked(lostTracks);
 
     const size_t nTracks = allTracks.size();
-    *nTrackOut = static_cast<unsigned int>(nTracks);
+    nTrackOut = static_cast<unsigned int>(nTracks);
 
     if (nTracks == 0) {
       putOutputs(event,
-                 std::move(nTrackOut),
-                 std::move(nEdgeOut),
-                 std::move(nEdgeRawOut),
-                 std::move(trackSVNonSV),
-                 std::move(trackSVPV),
-                 std::move(trackSVSV),
-                 std::move(trackSub0),
-                 std::move(trackSub1),
-                 std::move(trackSub2),
-                 std::move(edgeSrc),
-                 std::move(edgeDst),
-                 std::move(edgeProb),
-                 std::move(svLogit0),
-                 std::move(svLogit1),
-                 std::move(svLogit2),
-                 std::move(subLogit0),
-                 std::move(subLogit1),
-                 std::move(subLogit2),
-                 std::move(edgeLogit));
+                 nTrackOut,
+                 nEdgeOut,
+                 nEdgeRawOut,
+                 trackSVNonSV,
+                 trackSVPV,
+                 trackSVSV,
+                 trackSub0,
+                 trackSub1,
+                 trackSub2,
+                 edgeSrc,
+                 edgeDst,
+                 edgeProb,
+                 svLogit0,
+                 svLogit1,
+                 svLogit2,
+                 subLogit0,
+                 subLogit1,
+                 subLogit2,
+                 edgeLogit);
       return;
     }
 
@@ -208,8 +177,8 @@ public:
     trackFeatures.reserve(nTracks);
 
     for (size_t i = 0; i < nTracks; ++i) {
-      const auto &trk = allTracks[i];
-      const auto &tt = transientTracks[i];
+      const auto& trk = allTracks[i];
+      const auto& tt = transientTracks[i];
 
       float ip2d = -999.f;
       float ip3d = -999.f;
@@ -228,24 +197,23 @@ public:
         ip3dsig = std::abs(ip3dMeas.second.significance());
       }
 
-      float dz = std::abs(trk.dz(pv.position()));
-      float dzsig = (trk.dzError() > 0.f) ? std::abs(trk.dz(pv.position()) / trk.dzError()) : -999.f;
+      const float dz = std::abs(trk.dz(pv.position()));
+      const float dzsig = (trk.dzError() > 0.f) ? std::abs(trk.dz(pv.position()) / trk.dzError()) : -999.f;
 
-      trackFeatures.push_back({
-          trk.eta(),
-          trk.phi(),
-          ip2d,
-          ip3d,
-          dz,
-          dzsig,
-          ip2dsig,
-          ip3dsig,
-          trk.p(),
-          trk.pt(),
-          static_cast<float>(trk.numberOfValidHits()),
-          static_cast<float>(trk.hitPattern().numberOfValidPixelHits()),
-          static_cast<float>(trk.hitPattern().numberOfValidStripHits()),
-          static_cast<float>(trk.charge())});
+      trackFeatures.push_back({{static_cast<float>(trk.eta()),
+                                static_cast<float>(trk.phi()),
+                                ip2d,
+                                ip3d,
+                                dz,
+                                dzsig,
+                                ip2dsig,
+                                ip3dsig,
+                                static_cast<float>(trk.p()),
+                                static_cast<float>(trk.pt()),
+                                static_cast<float>(trk.numberOfValidHits()),
+                                static_cast<float>(trk.hitPattern().numberOfValidPixelHits()),
+                                static_cast<float>(trk.hitPattern().numberOfValidStripHits()),
+                                static_cast<float>(trk.charge())}});
     }
 
     std::vector<int> localSrc;
@@ -264,7 +232,7 @@ public:
         if (!transientTracks[j].isValid())
           continue;
 
-        (*nEdgeRawOut)++;
+        ++nEdgeRawOut;
 
         const float deltaR = reco::deltaR(allTracks[i].eta(), allTracks[i].phi(), allTracks[j].eta(), allTracks[j].phi());
         if (deltaR < edgeDeltaRMin_ || deltaR > edgeDeltaRMax_)
@@ -338,53 +306,52 @@ public:
 
         localSrc.push_back(static_cast<int>(i));
         localDst.push_back(static_cast<int>(j));
-        edgeFeatures.push_back({dca, deltaR, dcaSig, cpToPv, pvToPcaI, pvToPcaJ, dotI, dotJ, pairMom, invMass});
+        edgeFeatures.push_back({{dca, deltaR, dcaSig, cpToPv, pvToPcaI, pvToPcaJ, dotI, dotJ, pairMom, invMass}});
       }
     }
 
     const size_t nEdges = localSrc.size();
-    *nEdgeOut = static_cast<unsigned int>(nEdges);
+    nEdgeOut = static_cast<unsigned int>(nEdges);
 
-    // If there are no edges, we keep track arrays empty (conservative behavior).
     if (nEdges == 0) {
       putOutputs(event,
-                 std::move(nTrackOut),
-                 std::move(nEdgeOut),
-                 std::move(nEdgeRawOut),
-                 std::move(trackSVNonSV),
-                 std::move(trackSVPV),
-                 std::move(trackSVSV),
-                 std::move(trackSub0),
-                 std::move(trackSub1),
-                 std::move(trackSub2),
-                 std::move(edgeSrc),
-                 std::move(edgeDst),
-                 std::move(edgeProb),
-                 std::move(svLogit0),
-                 std::move(svLogit1),
-                 std::move(svLogit2),
-                 std::move(subLogit0),
-                 std::move(subLogit1),
-                 std::move(subLogit2),
-                 std::move(edgeLogit));
+                 nTrackOut,
+                 nEdgeOut,
+                 nEdgeRawOut,
+                 trackSVNonSV,
+                 trackSVPV,
+                 trackSVSV,
+                 trackSub0,
+                 trackSub1,
+                 trackSub2,
+                 edgeSrc,
+                 edgeDst,
+                 edgeProb,
+                 svLogit0,
+                 svLogit1,
+                 svLogit2,
+                 subLogit0,
+                 subLogit1,
+                 subLogit2,
+                 edgeLogit);
       return;
     }
 
     std::vector<float> xInFlat;
     xInFlat.reserve(nTracks * 14);
-    for (const auto &f : trackFeatures)
+    for (const auto& f : trackFeatures)
       xInFlat.insert(xInFlat.end(), f.begin(), f.end());
 
     std::vector<float> edgeIndexFlat;
     edgeIndexFlat.reserve(nEdges * 2);
-    for (const auto &s : localSrc)
+    for (const auto& s : localSrc)
       edgeIndexFlat.push_back(static_cast<float>(s));
-    for (const auto &d : localDst)
+    for (const auto& d : localDst)
       edgeIndexFlat.push_back(static_cast<float>(d));
 
     std::vector<float> edgeAttrFlat;
     edgeAttrFlat.reserve(nEdges * 10);
-    for (const auto &f : edgeFeatures)
+    for (const auto& f : edgeFeatures)
       edgeAttrFlat.insert(edgeAttrFlat.end(), f.begin(), f.end());
 
     std::vector<std::string> inputNames = {"x_in", "edge_index", "edge_attr"};
@@ -395,13 +362,13 @@ public:
     };
     std::vector<std::vector<float>> inputData = {xInFlat, edgeIndexFlat, edgeAttrFlat};
 
-    const auto output = globalCache()->run(inputNames, inputData, inputShapes);
-    if (output.size() < 3)
-      throw cms::Exception("TrackGNNNanoProducer") << "Model output has fewer than 3 tensors.";
+    const auto output = onnxRuntime_->run(inputNames, inputData, inputShapes);
+    if (output.size() < 4)
+      throw cms::Exception("TrackGNNNanoProducer") << "Model output has fewer than 4 tensors.";
 
-    const auto &svLogits = output[0];
-    const auto &subLogits = output[1];
-    const auto &edgeLogits = output[2];
+    const auto& svLogits = output[0];
+    const auto& subLogits = output[1];
+    const auto& edgeLogits = output[2];
 
     if (svLogits.size() != nTracks * 3 || subLogits.size() != nTracks * 3 || edgeLogits.size() != nEdges) {
       throw cms::Exception("TrackGNNNanoProducer") << "Unexpected model output sizes: "
@@ -410,73 +377,114 @@ public:
                                                     << ", E=" << nEdges;
     }
 
-    trackSVNonSV->reserve(nTracks);
-    trackSVPV->reserve(nTracks);
-    trackSVSV->reserve(nTracks);
-    trackSub0->reserve(nTracks);
-    trackSub1->reserve(nTracks);
-    trackSub2->reserve(nTracks);
+    trackSVNonSV.reserve(nTracks);
+    trackSVPV.reserve(nTracks);
+    trackSVSV.reserve(nTracks);
+    trackSub0.reserve(nTracks);
+    trackSub1.reserve(nTracks);
+    trackSub2.reserve(nTracks);
+
+    if (writeLogits_) {
+      svLogit0.reserve(nTracks);
+      svLogit1.reserve(nTracks);
+      svLogit2.reserve(nTracks);
+      subLogit0.reserve(nTracks);
+      subLogit1.reserve(nTracks);
+      subLogit2.reserve(nTracks);
+      edgeLogit.reserve(nEdges);
+    }
 
     for (size_t i = 0; i < nTracks; ++i) {
       float pNode[3];
       softmax3(svLogits[i * 3], svLogits[i * 3 + 1], svLogits[i * 3 + 2], pNode);
-      trackSVNonSV->push_back(pNode[0]);
-      trackSVPV->push_back(pNode[1]);
-      trackSVSV->push_back(pNode[2]);
+      trackSVNonSV.push_back(pNode[0]);
+      trackSVPV.push_back(pNode[1]);
+      trackSVSV.push_back(pNode[2]);
 
       float pSub[3];
       softmax3(subLogits[i * 3], subLogits[i * 3 + 1], subLogits[i * 3 + 2], pSub);
-      trackSub0->push_back(pSub[0]);
-      trackSub1->push_back(pSub[1]);
-      trackSub2->push_back(pSub[2]);
+      trackSub0.push_back(pSub[0]);
+      trackSub1.push_back(pSub[1]);
+      trackSub2.push_back(pSub[2]);
 
       if (writeLogits_) {
-        svLogit0->push_back(svLogits[i * 3]);
-        svLogit1->push_back(svLogits[i * 3 + 1]);
-        svLogit2->push_back(svLogits[i * 3 + 2]);
-        subLogit0->push_back(subLogits[i * 3]);
-        subLogit1->push_back(subLogits[i * 3 + 1]);
-        subLogit2->push_back(subLogits[i * 3 + 2]);
+        svLogit0.push_back(svLogits[i * 3]);
+        svLogit1.push_back(svLogits[i * 3 + 1]);
+        svLogit2.push_back(svLogits[i * 3 + 2]);
+        subLogit0.push_back(subLogits[i * 3]);
+        subLogit1.push_back(subLogits[i * 3 + 1]);
+        subLogit2.push_back(subLogits[i * 3 + 2]);
       }
     }
 
-    edgeSrc->insert(edgeSrc->end(), localSrc.begin(), localSrc.end());
-    edgeDst->insert(edgeDst->end(), localDst.begin(), localDst.end());
-    edgeProb->reserve(nEdges);
+    edgeSrc = localSrc;
+    edgeDst = localDst;
+    edgeProb.reserve(nEdges);
     for (size_t e = 0; e < nEdges; ++e) {
-      edgeProb->push_back(sigmoid(edgeLogits[e]));
+      edgeProb.push_back(sigmoid(edgeLogits[e]));
       if (writeLogits_)
-        edgeLogit->push_back(edgeLogits[e]);
+        edgeLogit.push_back(edgeLogits[e]);
     }
 
+    if (trackSVNonSV.size() != nTracks || trackSVPV.size() != nTracks || trackSVSV.size() != nTracks ||
+    trackSub0.size() != nTracks || trackSub1.size() != nTracks || trackSub2.size() != nTracks) {
+  throw cms::Exception("TrackGNNNanoProducer")
+      << "Track output size mismatch: "
+      << "nTracks=" << nTracks
+      << " svNonSV=" << trackSVNonSV.size()
+      << " svPV=" << trackSVPV.size()
+      << " svSV=" << trackSVSV.size()
+      << " sub0=" << trackSub0.size()
+      << " sub1=" << trackSub1.size()
+      << " sub2=" << trackSub2.size();
+}
+
+if (edgeSrc.size() != nEdges || edgeDst.size() != nEdges || edgeProb.size() != nEdges) {
+  throw cms::Exception("TrackGNNNanoProducer")
+      << "Edge output size mismatch: "
+      << "nEdges=" << nEdges
+      << " src=" << edgeSrc.size()
+      << " dst=" << edgeDst.size()
+      << " prob=" << edgeProb.size();
+}
+
+if(writeLogits_) {
+	if (svLogit0.size() != nTracks || svLogit1.size() != nTracks || svLogit2.size() != nTracks ||
+    subLogit0.size() != nTracks || subLogit1.size() != nTracks || subLogit2.size() != nTracks ||
+    edgeLogit.size() != nEdges) {
+  throw cms::Exception("TrackGNNNanoProducer")
+      << "Logit output size mismatch.";
+	}
+}
+
     putOutputs(event,
-               std::move(nTrackOut),
-               std::move(nEdgeOut),
-               std::move(nEdgeRawOut),
-               std::move(trackSVNonSV),
-               std::move(trackSVPV),
-               std::move(trackSVSV),
-               std::move(trackSub0),
-               std::move(trackSub1),
-               std::move(trackSub2),
-               std::move(edgeSrc),
-               std::move(edgeDst),
-               std::move(edgeProb),
-               std::move(svLogit0),
-               std::move(svLogit1),
-               std::move(svLogit2),
-               std::move(subLogit0),
-               std::move(subLogit1),
-               std::move(subLogit2),
-               std::move(edgeLogit));
+               nTrackOut,
+               nEdgeOut,
+               nEdgeRawOut,
+               trackSVNonSV,
+               trackSVPV,
+               trackSVSV,
+               trackSub0,
+               trackSub1,
+               trackSub2,
+               edgeSrc,
+               edgeDst,
+               edgeProb,
+               svLogit0,
+               svLogit1,
+               svLogit2,
+               subLogit0,
+               subLogit1,
+               subLogit2,
+               edgeLogit);
   }
 
-  static void fillDescriptions(edm::ConfigurationDescriptions &descriptions) {
+  static void fillDescriptions(edm::ConfigurationDescriptions& descriptions) {
     edm::ParameterSetDescription desc;
     desc.add<edm::InputTag>("tracks", edm::InputTag("packedPFCandidates"));
     desc.add<edm::InputTag>("losttracks", edm::InputTag("lostTracks", "", "PAT"));
     desc.add<edm::InputTag>("primaryVertices", edm::InputTag("offlineSlimmedPrimaryVertices"));
-    desc.add<edm::FileInPath>("model_path", edm::FileInPath("dispV/dispVAnalyzer/data/bhive_hcmod_1703.onnx"));
+    desc.add<edm::FileInPath>("model_path", edm::FileInPath("nano-custom-trackGNN/models/bhive_newsubmod_out128_1404.onnx"));
 
     desc.add<double>("trackPtCut", 0.0);
     desc.add<bool>("requireHighPurity", false);
@@ -496,7 +504,8 @@ public:
 
     desc.add<bool>("writeLogits", false);
 
-    descriptions.add("trackGNNNano", desc);
+    descriptions.addDefault(desc);
+
   }
 
 private:
@@ -520,53 +529,60 @@ private:
     out[2] = ec / s;
   }
 
-  void putOutputs(edm::Event &event,
-                  std::unique_ptr<unsigned int> nTrackOut,
-                  std::unique_ptr<unsigned int> nEdgeOut,
-                  std::unique_ptr<unsigned int> nEdgeRawOut,
-                  std::unique_ptr<std::vector<float>> trackSVNonSV,
-                  std::unique_ptr<std::vector<float>> trackSVPV,
-                  std::unique_ptr<std::vector<float>> trackSVSV,
-                  std::unique_ptr<std::vector<float>> trackSub0,
-                  std::unique_ptr<std::vector<float>> trackSub1,
-                  std::unique_ptr<std::vector<float>> trackSub2,
-                  std::unique_ptr<std::vector<int>> edgeSrc,
-                  std::unique_ptr<std::vector<int>> edgeDst,
-                  std::unique_ptr<std::vector<float>> edgeProb,
-                  std::unique_ptr<std::vector<float>> svLogit0,
-                  std::unique_ptr<std::vector<float>> svLogit1,
-                  std::unique_ptr<std::vector<float>> svLogit2,
-                  std::unique_ptr<std::vector<float>> subLogit0,
-                  std::unique_ptr<std::vector<float>> subLogit1,
-                  std::unique_ptr<std::vector<float>> subLogit2,
-                  std::unique_ptr<std::vector<float>> edgeLogit) const {
-    event.put(std::move(nTrackOut), "nTrackGNNTrack");
-    event.put(std::move(nEdgeOut), "nTrackGNNEdge");
-    event.put(std::move(nEdgeRawOut), "nTrackGNNEdgeRaw");
+  void putOutputs(edm::Event& event,
+                  unsigned int nTrackOut,
+                  unsigned int nEdgeOut,
+                  unsigned int nEdgeRawOut,
+                  const std::vector<float>& trackSVNonSV,
+                  const std::vector<float>& trackSVPV,
+                  const std::vector<float>& trackSVSV,
+                  const std::vector<float>& trackSub0,
+                  const std::vector<float>& trackSub1,
+                  const std::vector<float>& trackSub2,
+                  const std::vector<int>& edgeSrc,
+                  const std::vector<int>& edgeDst,
+                  const std::vector<float>& edgeProb,
+                  const std::vector<float>& svLogit0,
+                  const std::vector<float>& svLogit1,
+                  const std::vector<float>& svLogit2,
+                  const std::vector<float>& subLogit0,
+                  const std::vector<float>& subLogit1,
+                  const std::vector<float>& subLogit2,
+                  const std::vector<float>& edgeLogit) const {
+    auto summary = std::make_unique<nanoaod::FlatTable>(1, "TrackGNNSummary", true, false);
+    summary->addColumnValue<int>("nTrack", static_cast<int>(nTrackOut), "Number of TrackGNN input tracks");
+    summary->addColumnValue<int>("nEdge", static_cast<int>(nEdgeOut), "Number of accepted TrackGNN edges");
+    summary->addColumnValue<int>("nEdgeRaw", static_cast<int>(nEdgeRawOut), "Number of raw edge pairs before final selection");
+    event.put(std::move(summary), "TrackGNNSummaryTable");
 
-    event.put(std::move(trackSVNonSV), "TrackGNN_track_SV_prob_nonSV");
-    event.put(std::move(trackSVPV), "TrackGNN_track_SV_prob_PV");
-    event.put(std::move(trackSVSV), "TrackGNN_track_SV_prob_SV");
-
-    event.put(std::move(trackSub0), "TrackGNN_track_sub_prob_0");
-    event.put(std::move(trackSub1), "TrackGNN_track_sub_prob_1");
-    event.put(std::move(trackSub2), "TrackGNN_track_sub_prob_2");
-
-    event.put(std::move(edgeSrc), "TrackGNN_edge_src");
-    event.put(std::move(edgeDst), "TrackGNN_edge_dst");
-    event.put(std::move(edgeProb), "TrackGNN_edge_prob");
-
+    auto trackTable = std::make_unique<nanoaod::FlatTable>(trackSVNonSV.size(), "TrackGNN", false, false);
+    trackTable->addColumn<float>("svProbNonSV", trackSVNonSV, "Track-level SV class probability: nonSV");
+    trackTable->addColumn<float>("svProbPV", trackSVPV, "Track-level SV class probability: PV");
+    trackTable->addColumn<float>("svProbSV", trackSVSV, "Track-level SV class probability: SV");
+    trackTable->addColumn<float>("subProb0", trackSub0, "Track-level subclass probability 0");
+    trackTable->addColumn<float>("subProb1", trackSub1, "Track-level subclass probability 1");
+    trackTable->addColumn<float>("subProb2", trackSub2, "Track-level subclass probability 2");
     if (writeLogits_) {
-      event.put(std::move(svLogit0), "TrackGNN_track_SV_logit_nonSV");
-      event.put(std::move(svLogit1), "TrackGNN_track_SV_logit_PV");
-      event.put(std::move(svLogit2), "TrackGNN_track_SV_logit_SV");
-      event.put(std::move(subLogit0), "TrackGNN_track_sub_logit_0");
-      event.put(std::move(subLogit1), "TrackGNN_track_sub_logit_1");
-      event.put(std::move(subLogit2), "TrackGNN_track_sub_logit_2");
-      event.put(std::move(edgeLogit), "TrackGNN_edge_logit");
+      trackTable->addColumn<float>("svLogitNonSV", svLogit0, "Track-level SV logit: nonSV");
+      trackTable->addColumn<float>("svLogitPV", svLogit1, "Track-level SV logit: PV");
+      trackTable->addColumn<float>("svLogitSV", svLogit2, "Track-level SV logit: SV");
+      trackTable->addColumn<float>("subLogit0", subLogit0, "Track-level subclass logit 0");
+      trackTable->addColumn<float>("subLogit1", subLogit1, "Track-level subclass logit 1");
+      trackTable->addColumn<float>("subLogit2", subLogit2, "Track-level subclass logit 2");
     }
+    event.put(std::move(trackTable), "TrackGNNTrackTable");
+
+    auto edgeTable = std::make_unique<nanoaod::FlatTable>(edgeProb.size(), "TrackGNNEdge", false, false);
+    edgeTable->addColumn<int>("src", edgeSrc, "Source track index into TrackGNN table");
+    edgeTable->addColumn<int>("dst", edgeDst, "Destination track index into TrackGNN table");
+    edgeTable->addColumn<float>("prob", edgeProb, "Edge probability");
+    if (writeLogits_) {
+      edgeTable->addColumn<float>("logit", edgeLogit, "Edge logit");
+    }
+    event.put(std::move(edgeTable), "TrackGNNEdgeTable");
   }
 
+  const cms::Ort::ONNXRuntime* onnxRuntime_;
   edm::EDGetTokenT<pat::PackedCandidateCollection> tracksToken_;
   edm::EDGetTokenT<pat::PackedCandidateCollection> lostTracksToken_;
   edm::EDGetTokenT<reco::VertexCollection> pvToken_;
@@ -592,3 +608,4 @@ private:
 };
 
 DEFINE_FWK_MODULE(TrackGNNNanoProducer);
+

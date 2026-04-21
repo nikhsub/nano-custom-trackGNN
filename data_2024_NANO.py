@@ -115,6 +115,8 @@ process = nanoAOD_customizeCommon(process)
 
 
 # Customisation from command line
+from PhysicsTools.NanoAOD.trackGNN_cff import nanoAOD_addTrackGNN
+process = nanoAOD_addTrackGNN(process)
 
 process.source.delayReadingEventProducts = cms.untracked.bool(False)
 

@@ -8,7 +8,7 @@ trackGNNNano = cms.EDProducer(
     primaryVertices=cms.InputTag("offlineSlimmedPrimaryVertices"),
 
     # Model
-    model_path=cms.FileInPath("dispV/dispVAnalyzer/data/bhive_hcmod_1703.onnx"),
+    model_path=cms.FileInPath("PhysicsTools/NanoAOD/data/TrackGNN/bhive_newsubmod_out128_1404.onnx"),
 
     # Track handling (all tracks by default)
     trackPtCut=cms.double(0.0),
@@ -29,9 +29,9 @@ trackGNNNano = cms.EDProducer(
     edgePairMomMax=cms.double(100.0),
 
     # Output switches
-    writeTrackSVProb=cms.bool(True),
-    writeTrackSubProb=cms.bool(True),
-    writeEdgeProb=cms.bool(True),
-    writeEdgeIndex=cms.bool(True),
+    #writeTrackSVProb=cms.bool(True),
+    #writeTrackSubProb=cms.bool(True),
+    #writeEdgeProb=cms.bool(True),
+    #writeEdgeIndex=cms.bool(True),
     writeLogits=cms.bool(False),
 )

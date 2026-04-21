@@ -10,5 +10,8 @@ crab_projects_*/
 __pycache__
 
 # also the final config files
-data_201*_NANO.py
-mc_201*_NANO.py
+data_20*_NANO.py
+mc_20*_NANO.py
+
+*.root
+models/
